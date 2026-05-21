@@ -1,29 +1,24 @@
 """
-Main Streamlit UI for the RAG Chatbot.
+RAG Chatbot — Iron Man UI.
+White background, Orbitron + Rajdhani fonts, modal-based config, settings popover.
 """
-
 import streamlit as st
 import logging
-import time
 from datetime import datetime
 
-# ── page config (must be first Streamlit call) ──────────────────────
 st.set_page_config(
     page_title="RAG Chatbot",
-    page_icon="assets/favicon.png" if __import__("os").path.exists("assets/favicon.png") else "💬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 from rag_pipeline import RAGPipeline
 from web_scraper import WebScraper
 from export_utils import export_as_txt, export_as_csv, export_as_json, export_as_pdf
-from evaluation import batch_evaluate
 from llm_provider import GROQ_MODELS
 import styles  # injects CSS
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════ #
@@ -33,19 +28,18 @@ logger = logging.getLogger(__name__)
 def init_state():
     defaults = {
         "pipeline": None,
-        "messages": [],           # [{role, content, timestamp, eval, sources, chunks}]
-        "api_key": "",
+        "messages": [],
         "llm_ready": False,
         "scraper": WebScraper(),
-        "active_tab": "chat",
-        "eval_history": [],
         "search_mode": "hybrid",
-        "chunk_size": 512,
-        "chunk_overlap": 64,
         "top_k": 5,
         "multilingual": True,
         "eval_enabled": True,
+        "eval_history": [],
         "doc_metadata": [],
+        "show_llm_modal": False,
+        "chunk_size": 512,
+        "chunk_overlap": 64,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -54,292 +48,230 @@ def init_state():
 init_state()
 
 
-# ═══════════════════════════════════════════════════════════════════ #
-#  Pipeline helpers                                                    #
-# ═══════════════════════════════════════════════════════════════════ #
-
 def get_pipeline() -> RAGPipeline:
     if st.session_state.pipeline is None:
         st.session_state.pipeline = RAGPipeline()
     return st.session_state.pipeline
 
 
-def try_init_llm(provider, model, api_key):
-    pipeline = get_pipeline()
-    try:
-        pipeline.llm.initialize(provider=provider, model_name=model, api_key=api_key)
-        pipeline.multilingual.enabled = st.session_state.multilingual
-        st.session_state.llm_ready = True
-        return True, None
-    except Exception as e:
-        st.session_state.llm_ready = False
-        return False, str(e)
+# ═══════════════════════════════════════════════════════════════════ #
+#  Top Navigation Bar (HTML)                                           #
+# ═══════════════════════════════════════════════════════════════════ #
+
+llm_status_class = "connected" if st.session_state.llm_ready else "disconnected"
+llm_status_text  = "LLM ONLINE"  if st.session_state.llm_ready else "LLM OFFLINE"
+
+st.markdown(f"""
+<div class="topbar">
+  <div class="topbar-brand">RAG<span>BOT</span></div>
+  <div class="topbar-right">
+    <div class="made-in-india">
+      <svg width="14" height="10" viewBox="0 0 14 10" style="border-radius:1px;overflow:hidden">
+        <rect width="14" height="3.33" fill="#FF9933"/>
+        <rect y="3.33" width="14" height="3.33" fill="#FFFFFF"/>
+        <rect y="6.67" width="14" height="3.33" fill="#138808"/>
+        <circle cx="7" cy="5" r="1.2" fill="none" stroke="#000080" stroke-width="0.4"/>
+      </svg>
+      Made in India
+    </div>
+    <span class="status-dot {llm_status_class}" title="{llm_status_text}"></span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════ #
-#  Sidebar                                                             #
+#  LLM Config Modal                                                    #
 # ═══════════════════════════════════════════════════════════════════ #
 
-def render_sidebar():
-    with st.sidebar:
-        st.markdown('<div class="sidebar-logo">RAG Chatbot</div>', unsafe_allow_html=True)
-        st.markdown("---")
+@st.dialog("Configure Language Model")
+def show_llm_modal():
+    st.markdown('<p class="section-title">LLM Configuration</p>', unsafe_allow_html=True)
 
-        # ── LLM Settings ──────────────────────────────────────────
-        st.markdown("### LLM Configuration")
-        provider = st.selectbox(
-            "Provider", ["groq", "huggingface"], key="llm_provider",
-            help="Groq is recommended — fast and free."
-        )
-        if provider == "groq":
-            model = st.selectbox("Model", GROQ_MODELS, key="llm_model")
-        else:
-            model = st.text_input(
-                "HuggingFace Model ID",
-                value="mistralai/Mistral-7B-Instruct-v0.2",
-                key="llm_model_hf",
-            )
+    provider = st.selectbox(
+        "Provider", ["groq", "huggingface"],
+        help="Groq is free and fast. Get an API key at console.groq.com"
+    )
 
-        api_key = st.text_input(
-            "API Key", type="password",
-            placeholder="Paste your API key here...",
-            key="api_key_input",
-        )
+    if provider == "groq":
+        model = st.selectbox("Model", GROQ_MODELS)
+    else:
+        model = st.text_input("HuggingFace Model ID",
+                              value="mistralai/Mistral-7B-Instruct-v0.2")
 
-        if st.button("Connect LLM", key="btn_connect_llm", use_container_width=True):
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        placeholder="Paste your API key here (starts with gsk_...)" if provider == "groq"
+                    else "Paste your HuggingFace token here"
+    )
+
+    if provider == "groq":
+        st.caption("Get a free API key at console.groq.com")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Connect", type="primary", use_container_width=True):
             if not api_key.strip():
                 st.error("API key is required.")
             else:
-                with st.spinner("Connecting..."):
-                    ok, err = try_init_llm(provider, model, api_key.strip())
-                if ok:
-                    st.success("LLM connected successfully.")
-                else:
-                    st.error(f"Failed: {err}")
-
-        # Status badge
-        if st.session_state.llm_ready:
-            st.markdown('<span class="badge badge-green">LLM Connected</span>', unsafe_allow_html=True)
-        else:
-            st.markdown('<span class="badge badge-red">LLM Not Connected</span>', unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # ── Retrieval Settings ───────────────────────────────────
-        st.markdown("### Retrieval Settings")
-        st.session_state.search_mode = st.radio(
-            "Search Mode",
-            ["hybrid", "dense", "sparse"],
-            key="search_mode_radio",
-            horizontal=True,
-        )
-        st.session_state.top_k = st.slider("Top-K Chunks", 1, 15, 5, key="top_k_slider")
-        st.session_state.eval_enabled = st.toggle("Enable Evaluation", value=True)
-        st.session_state.multilingual = st.toggle("Multilingual Mode", value=True)
-
-        st.markdown("---")
-
-        # ── Chunking Settings ────────────────────────────────────
-        with st.expander("Chunking Settings"):
-            chunk_size = st.slider("Chunk Size", 128, 2048, 512, step=64)
-            chunk_overlap = st.slider("Chunk Overlap", 0, 256, 64, step=16)
-            strategy = st.selectbox("Strategy", ["recursive", "character", "token"])
-            if st.button("Apply Chunking Settings", key="btn_apply_chunk"):
-                p = get_pipeline()
-                p.chunker.update_settings(chunk_size, chunk_overlap, strategy)
-                st.success("Chunking settings updated.")
-
-        st.markdown("---")
-
-        # ── Quick Actions ────────────────────────────────────────
-        st.markdown("### Actions")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Clear Chat", key="btn_clear_chat", use_container_width=True):
-                st.session_state.messages = []
-                get_pipeline().reset_conversation()
-                st.rerun()
-        with col2:
-            if st.button("Reset All", key="btn_reset_all", use_container_width=True):
-                st.session_state.messages = []
-                st.session_state.eval_history = []
-                st.session_state.doc_metadata = []
-                get_pipeline().reset_all()
-                st.rerun()
-
-        # ── Status panel ─────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("### System Status")
-        p = get_pipeline()
-        status = p.status
-        st.metric("Indexed Chunks", status["documents_indexed"])
-        st.metric("Chat Turns", status["conversation_turns"])
-        if status["sources"]:
-            with st.expander("Indexed Sources"):
-                for s in status["sources"]:
-                    st.markdown(f"- `{s}`")
-
-        st.markdown("---")
-        st.caption("Built with LangChain · FAISS · RAGAS · Groq")
-
-
-# ═══════════════════════════════════════════════════════════════════ #
-#  Tab: Documents                                                      #
-# ═══════════════════════════════════════════════════════════════════ #
-
-def render_documents_tab():
-    st.markdown("## Document Management")
-    col_upload, col_web = st.columns([1, 1], gap="large")
-
-    with col_upload:
-        st.markdown("### Upload Files")
-        st.markdown("Supported: PDF, DOCX, TXT, MD")
-        uploaded = st.file_uploader(
-            "Drop files here",
-            type=["pdf", "docx", "doc", "txt", "md"],
-            accept_multiple_files=True,
-            key="file_uploader",
-            label_visibility="collapsed",
-        )
-        if uploaded:
-            if st.button("Process Files", key="btn_process_files", use_container_width=True):
-                with st.spinner("Loading and indexing..."):
-                    result = get_pipeline().ingest_files(uploaded)
-                if result["success"]:
-                    st.success(
-                        f"Indexed {result['chunks_added']} chunks from "
-                        f"{len(uploaded)} file(s). Total: {result['total_chunks']} chunks."
-                    )
-                    for f in uploaded:
-                        st.session_state.doc_metadata.append({
-                            "name": f.name,
-                            "size_kb": round(f.size / 1024, 1),
-                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        })
-                    if result["errors"]:
-                        st.warning("Some files had errors: " + "; ".join(result["errors"]))
-                else:
-                    st.error(result["message"])
-
-    with col_web:
-        st.markdown("### Web Scraping Mode")
-        urls_input = st.text_area(
-            "Enter URLs (one per line)",
-            placeholder="https://example.com\nhttps://docs.example.com/guide",
-            height=120,
-            key="urls_input",
-        )
-        follow_links = st.checkbox("Follow internal links", value=False)
-        max_pages = st.number_input("Max pages to scrape", 1, 20, 5)
-
-        if st.button("Scrape & Index", key="btn_scrape", use_container_width=True):
-            urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
-            if not urls:
-                st.warning("Please enter at least one URL.")
-            else:
-                with st.spinner(f"Scraping {len(urls)} URL(s)..."):
-                    scraper = st.session_state.scraper
-                    web_docs = scraper.scrape_multiple(
-                        urls, follow_links=follow_links, max_pages=max_pages
-                    )
-                if not web_docs:
-                    st.error("No content could be scraped from the provided URLs.")
-                else:
-                    result = get_pipeline().ingest_web_documents(web_docs)
-                    if result["success"]:
-                        st.success(
-                            f"Scraped {len(web_docs)} page(s), indexed {result['chunks_added']} chunks."
+                with st.spinner("Connecting to LLM..."):
+                    try:
+                        p = get_pipeline()
+                        p.llm.initialize(
+                            provider=provider,
+                            model_name=model,
+                            api_key=api_key.strip()
                         )
-                    else:
-                        st.error(result["message"])
-
-    # ── Document table ───────────────────────────────────────────────
-    if st.session_state.doc_metadata:
-        st.markdown("---")
-        st.markdown("### Indexed Documents")
-        import pandas as pd
-        df = pd.DataFrame(st.session_state.doc_metadata)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        if st.button("Clear All Documents", key="btn_clear_docs"):
-            st.session_state.doc_metadata = []
-            get_pipeline().reset_all()
+                        p.multilingual.enabled = st.session_state.multilingual
+                        st.session_state.llm_ready = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Connection failed: {e}")
+    with col2:
+        if st.button("Cancel", use_container_width=True):
             st.rerun()
 
 
+# Show modal automatically if LLM not connected
+if not st.session_state.llm_ready:
+    if "llm_modal_shown" not in st.session_state:
+        st.session_state["llm_modal_shown"] = False
+    if not st.session_state["llm_modal_shown"]:
+        st.session_state["llm_modal_shown"] = True
+        show_llm_modal()
+
+
 # ═══════════════════════════════════════════════════════════════════ #
-#  Tab: Chat                                                           #
+#  Settings Popover (top right area below topbar)                      #
 # ═══════════════════════════════════════════════════════════════════ #
 
-def render_chat_tab():
-    st.markdown("## Chat")
+# Push content below fixed topbar
+st.markdown('<div style="height:70px"></div>', unsafe_allow_html=True)
 
-    # Readiness warnings
+# Settings button row
+btn_col1, btn_col2, btn_col3 = st.columns([8, 1, 1])
+with btn_col2:
+    if st.button("Configure LLM", key="btn_open_llm"):
+        show_llm_modal()
+with btn_col3:
+    settings_open = st.button("Settings", key="btn_settings")
+
+if settings_open:
+    st.session_state["settings_panel"] = not st.session_state.get("settings_panel", False)
+
+if st.session_state.get("settings_panel", False):
+    with st.container():
+        st.markdown("---")
+        scol1, scol2, scol3 = st.columns(3)
+
+        with scol1:
+            st.markdown('<p class="section-title">Retrieval Settings</p>', unsafe_allow_html=True)
+            st.session_state.search_mode = st.radio(
+                "Search Mode", ["hybrid", "dense", "sparse"],
+                horizontal=True, key="s_mode"
+            )
+            st.session_state.top_k = st.slider("Top-K Chunks", 1, 15, 5, key="s_topk")
+            st.session_state.eval_enabled = st.toggle("Enable Evaluation", value=True)
+            st.session_state.multilingual = st.toggle("Multilingual Mode", value=True)
+
+        with scol2:
+            st.markdown('<p class="section-title">Chunking</p>', unsafe_allow_html=True)
+            chunk_size = st.slider("Chunk Size", 128, 2048, 512, step=64, key="s_cs")
+            chunk_overlap = st.slider("Overlap", 0, 256, 64, step=16, key="s_co")
+            strategy = st.selectbox("Strategy", ["recursive", "character", "token"], key="s_str")
+            if st.button("Apply Chunking", key="s_apply"):
+                get_pipeline().chunker.update_settings(chunk_size, chunk_overlap, strategy)
+                st.success("Chunking settings updated.")
+
+        with scol3:
+            st.markdown('<p class="section-title">Actions & Status</p>', unsafe_allow_html=True)
+            p = get_pipeline()
+            status = p.status
+            st.metric("Indexed Chunks", status["documents_indexed"])
+            st.metric("Chat Turns", status["conversation_turns"])
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Clear Chat", key="s_clr", use_container_width=True):
+                    st.session_state.messages = []
+                    p.reset_conversation()
+                    st.rerun()
+            with c2:
+                if st.button("Reset All", key="s_rst", use_container_width=True):
+                    st.session_state.messages = []
+                    st.session_state.eval_history = []
+                    st.session_state.doc_metadata = []
+                    p.reset_all()
+                    st.rerun()
+
+            if status["sources"]:
+                st.markdown("**Sources:**")
+                for s in status["sources"]:
+                    st.markdown(f"`{s.split('/')[-1]}`")
+
+        st.markdown("---")
+
+
+# ═══════════════════════════════════════════════════════════════════ #
+#  Main Tabs                                                           #
+# ═══════════════════════════════════════════════════════════════════ #
+
+tab_chat, tab_docs, tab_eval, tab_export = st.tabs(
+    ["Chat", "Documents", "Evaluation", "Export"]
+)
+
+
+# ── Chat ────────────────────────────────────────────────────────────
+with tab_chat:
+    if not st.session_state.llm_ready:
+        st.info("Click 'Configure LLM' above to connect your language model.")
+    if not get_pipeline().vector_store.is_ready:
+        st.info("No documents indexed. Go to the Documents tab to add knowledge.")
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            meta = []
+            if msg.get("timestamp"):   meta.append(msg["timestamp"])
+            if msg.get("sources"):     meta.append("Sources: " + ", ".join(
+                s.split("/")[-1] for s in msg["sources"]))
+            if msg.get("retrieval_mode"): meta.append(f"Mode: {msg['retrieval_mode']}")
+            if meta:
+                st.caption("  |  ".join(meta))
+
+            ev = msg.get("eval")
+            if ev:
+                with st.expander("Evaluation Scores"):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Faithfulness",  f"{ev.faithfulness:.2f}")
+                    c2.metric("Relevancy",     f"{ev.answer_relevancy:.2f}")
+                    c3.metric("Precision",     f"{ev.context_precision:.2f}")
+                    c4.metric("Overall",       f"{ev.overall_score:.2f}")
+
+            if msg.get("chunks") and msg["role"] == "assistant":
+                with st.expander(f"Retrieved Chunks ({len(msg['chunks'])})"):
+                    for i, chunk in enumerate(msg["chunks"]):
+                        src = chunk.get("metadata", {}).get("source", "Unknown")
+                        pg  = chunk.get("metadata", {}).get("page", "")
+                        pg_str = f" · Page {pg}" if pg else ""
+                        st.markdown(
+                            f'<div class="chunk-card">'
+                            f'<span class="chunk-source">[{i+1}] {src}{pg_str}</span>'
+                            f'<p class="chunk-text">{chunk["page_content"][:400]}...</p>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
     p = get_pipeline()
-    if not p.llm.is_ready:
-        st.warning("Connect the LLM from the sidebar to start chatting.")
-    if not p.vector_store.is_ready:
-        st.info("No documents indexed yet. Go to the Documents tab to add knowledge.")
-
-    # ── Message history ──────────────────────────────────────────────
-    chat_container = st.container()
-    with chat_container:
-        for msg in st.session_state.messages:
-            role = msg["role"]
-            with st.chat_message(role):
-                st.markdown(msg["content"])
-                # Meta row
-                meta_parts = []
-                if msg.get("timestamp"):
-                    meta_parts.append(msg["timestamp"])
-                if msg.get("sources"):
-                    meta_parts.append("Sources: " + ", ".join(
-                        [s.split("/")[-1] for s in msg["sources"]]
-                    ))
-                if msg.get("retrieval_mode"):
-                    meta_parts.append(f"Mode: {msg['retrieval_mode']}")
-                if meta_parts:
-                    st.caption("  |  ".join(meta_parts))
-
-                # Evaluation badge
-                ev = msg.get("eval")
-                if ev:
-                    with st.expander("Evaluation Scores"):
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Faithfulness", f"{ev.faithfulness:.2f}")
-                        c2.metric("Relevancy", f"{ev.answer_relevancy:.2f}")
-                        c3.metric("Precision", f"{ev.context_precision:.2f}")
-                        c4.metric("Overall", f"{ev.overall_score:.2f}")
-
-                # Retrieved chunks
-                if msg.get("chunks") and role == "assistant":
-                    with st.expander(f"Retrieved Chunks ({len(msg['chunks'])})"):
-                        for i, chunk in enumerate(msg["chunks"]):
-                            src = chunk.get("metadata", {}).get("source", "Unknown")
-                            pg = chunk.get("metadata", {}).get("page", "")
-                            pg_str = f" · Page {pg}" if pg else ""
-                            st.markdown(
-                                f'<div class="chunk-card">'
-                                f'<span class="chunk-source">[{i+1}] {src}{pg_str}</span>'
-                                f'<p class="chunk-text">{chunk["page_content"][:400]}...</p>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-
-    # ── Input ────────────────────────────────────────────────────────
     user_input = st.chat_input(
         "Ask a question about your documents...",
-        key="chat_input",
         disabled=not (p.llm.is_ready and p.vector_store.is_ready),
     )
 
     if user_input:
         ts = datetime.now().strftime("%H:%M:%S")
-        st.session_state.messages.append({
-            "role": "user",
-            "content": user_input,
-            "timestamp": ts,
-        })
+        st.session_state.messages.append({"role": "user", "content": user_input, "timestamp": ts})
 
         with st.spinner("Retrieving and generating..."):
             result = p.query(
@@ -370,174 +302,167 @@ def render_chat_tab():
                 "overall_score": ev.overall_score,
                 "timestamp": ts,
             })
-
         st.rerun()
 
 
-# ═══════════════════════════════════════════════════════════════════ #
-#  Tab: Evaluation                                                     #
-# ═══════════════════════════════════════════════════════════════════ #
+# ── Documents ────────────────────────────────────────────────────────
+with tab_docs:
+    st.markdown('<p class="section-title">Document Management</p>', unsafe_allow_html=True)
+    col_up, col_web = st.columns(2, gap="large")
 
-def render_evaluation_tab():
-    st.markdown("## Evaluation Dashboard")
-    st.markdown(
-        "Metrics are computed using the **RAGAS** framework "
-        "(with heuristic fallback). Scores range from 0 to 1."
-    )
+    with col_up:
+        st.markdown("**Upload Files**")
+        st.caption("Supported: PDF, DOCX, TXT, Markdown")
+        uploaded = st.file_uploader(
+            "Drop files here", type=["pdf","docx","doc","txt","md"],
+            accept_multiple_files=True, label_visibility="collapsed"
+        )
+        if uploaded:
+            if st.button("Process Files", use_container_width=True):
+                with st.spinner("Indexing..."):
+                    result = get_pipeline().ingest_files(uploaded)
+                if result["success"]:
+                    st.success(f"Indexed {result['chunks_added']} chunks from {len(uploaded)} file(s).")
+                    for f in uploaded:
+                        st.session_state.doc_metadata.append({
+                            "name": f.name,
+                            "size_kb": round(f.size / 1024, 1),
+                            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                    if result.get("errors"):
+                        st.warning("Errors: " + "; ".join(result["errors"]))
+                else:
+                    st.error(result["message"])
+
+    with col_web:
+        st.markdown("**Web Scraping**")
+        urls_input = st.text_area("URLs (one per line)",
+            placeholder="https://example.com", height=120,
+            label_visibility="collapsed")
+        follow = st.checkbox("Follow internal links")
+        max_p  = st.number_input("Max pages", 1, 20, 5)
+        if st.button("Scrape and Index", use_container_width=True):
+            urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
+            if not urls:
+                st.warning("Enter at least one URL.")
+            else:
+                with st.spinner(f"Scraping {len(urls)} URL(s)..."):
+                    docs = st.session_state.scraper.scrape_multiple(urls, follow_links=follow, max_pages=max_p)
+                if not docs:
+                    st.error("No content scraped.")
+                else:
+                    r = get_pipeline().ingest_web_documents(docs)
+                    if r["success"]:
+                        st.success(f"Indexed {r['chunks_added']} chunks from {len(docs)} page(s).")
+                    else:
+                        st.error(r["message"])
+
+    if st.session_state.doc_metadata:
+        st.markdown("---")
+        st.markdown("**Indexed Documents**")
+        import pandas as pd
+        st.dataframe(pd.DataFrame(st.session_state.doc_metadata),
+                     use_container_width=True, hide_index=True)
+        if st.button("Clear All Documents"):
+            st.session_state.doc_metadata = []
+            get_pipeline().reset_all()
+            st.rerun()
+
+
+# ── Evaluation ───────────────────────────────────────────────────────
+with tab_eval:
+    st.markdown('<p class="section-title">Evaluation Dashboard</p>', unsafe_allow_html=True)
 
     if not st.session_state.eval_history:
         st.info("No evaluation data yet. Start chatting to collect metrics.")
-        return
+    else:
+        import pandas as pd
+        import plotly.express as px
+        import plotly.graph_objects as go
 
-    import pandas as pd
-    import plotly.express as px
-    import plotly.graph_objects as go
+        df = pd.DataFrame(st.session_state.eval_history)
 
-    df = pd.DataFrame(st.session_state.eval_history)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Avg Faithfulness",    f"{df['faithfulness'].mean():.3f}")
+        c2.metric("Avg Relevancy",       f"{df['answer_relevancy'].mean():.3f}")
+        c3.metric("Avg Precision",       f"{df['context_precision'].mean():.3f}")
+        c4.metric("Avg Overall",         f"{df['overall_score'].mean():.3f}")
 
-    # ── Summary cards ────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Avg Faithfulness",    f"{df['faithfulness'].mean():.3f}")
-    c2.metric("Avg Answer Relevancy", f"{df['answer_relevancy'].mean():.3f}")
-    c3.metric("Avg Context Precision", f"{df['context_precision'].mean():.3f}")
-    c4.metric("Avg Overall Score",   f"{df['overall_score'].mean():.3f}")
+        st.markdown("---")
+        ca, cb = st.columns(2)
+        with ca:
+            fig = px.line(df.reset_index(), x="index",
+                y=["faithfulness","answer_relevancy","context_precision","overall_score"],
+                color_discrete_sequence=["#C0392B","#E67E22","#27AE60","#2980B9"],
+                labels={"index":"Query #","value":"Score","variable":"Metric"})
+            fig.update_layout(plot_bgcolor="#fff", paper_bgcolor="#fff",
+                              font_family="Rajdhani", margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        with cb:
+            fig2 = go.Figure()
+            for col, col_color in zip(
+                ["faithfulness","answer_relevancy","context_precision"],
+                ["#C0392B","#E67E22","#27AE60"]
+            ):
+                fig2.add_trace(go.Box(y=df[col],
+                    name=col.replace("_"," ").title(),
+                    marker_color=col_color, boxpoints="all"))
+            fig2.update_layout(plot_bgcolor="#fff", paper_bgcolor="#fff",
+                               font_family="Rajdhani", margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown("---")
+        st.dataframe(df[["timestamp","question","faithfulness",
+                          "answer_relevancy","context_precision","overall_score"]],
+                     use_container_width=True, hide_index=True)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("### Score Trends")
-        fig = px.line(
-            df.reset_index(),
-            x="index",
-            y=["faithfulness", "answer_relevancy", "context_precision", "overall_score"],
-            labels={"index": "Query #", "value": "Score", "variable": "Metric"},
-            color_discrete_sequence=["#2563EB", "#10B981", "#F59E0B", "#6366F1"],
-        )
-        fig.update_layout(
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            font_family="Inter",
-            legend_title_text="Metric",
-            margin=dict(l=10, r=10, t=20, b=10),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_b:
-        st.markdown("### Metric Distribution")
-        fig2 = go.Figure()
-        for col, color in zip(
-            ["faithfulness", "answer_relevancy", "context_precision"],
-            ["#2563EB", "#10B981", "#F59E0B"],
-        ):
-            fig2.add_trace(go.Box(
-                y=df[col], name=col.replace("_", " ").title(),
-                marker_color=color, boxpoints="all",
-            ))
-        fig2.update_layout(
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            font_family="Inter",
-            margin=dict(l=10, r=10, t=20, b=10),
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("### Query-Level Scores")
-    display_df = df[["timestamp", "question", "faithfulness",
-                      "answer_relevancy", "context_precision", "overall_score"]].copy()
-    display_df["question"] = display_df["question"].str[:80] + "..."
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    if st.button("Clear Evaluation History", key="btn_clear_eval"):
-        st.session_state.eval_history = []
-        st.rerun()
+        if st.button("Clear Evaluation History"):
+            st.session_state.eval_history = []
+            st.rerun()
 
 
-# ═══════════════════════════════════════════════════════════════════ #
-#  Tab: Export                                                         #
-# ═══════════════════════════════════════════════════════════════════ #
-
-def render_export_tab():
-    st.markdown("## Export Chat")
+# ── Export ───────────────────────────────────────────────────────────
+with tab_export:
+    st.markdown('<p class="section-title">Export</p>', unsafe_allow_html=True)
 
     if not st.session_state.messages:
         st.info("No messages to export. Start a conversation first.")
-        return
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        msgs = st.session_state.messages
+        ecol1, ecol2 = st.columns(2)
 
-    col1, col2 = st.columns(2)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    msgs = st.session_state.messages
+        with ecol1:
+            st.markdown("**Download Chat History**")
+            fmt = st.selectbox("Format", ["TXT","CSV","JSON","PDF"])
+            if st.button("Generate Export", use_container_width=True):
+                if fmt == "TXT":
+                    data, mime, ext = export_as_txt(msgs, "RAG Chatbot Export"), "text/plain", "txt"
+                elif fmt == "CSV":
+                    data, mime, ext = export_as_csv(msgs), "text/csv", "csv"
+                elif fmt == "JSON":
+                    data, mime, ext = export_as_json(msgs), "application/json", "json"
+                else:
+                    data, mime, ext = export_as_pdf(msgs, "RAG Chatbot Export"), "application/pdf", "pdf"
+                st.download_button(f"Download .{ext}", data=data,
+                    file_name=f"rag_chat_{ts}.{ext}", mime=mime)
 
-    with col1:
-        st.markdown("### Download Chat History")
-        fmt = st.selectbox("Format", ["TXT", "CSV", "JSON", "PDF"], key="export_fmt")
-        if st.button("Generate Export", key="btn_export", use_container_width=True):
-            if fmt == "TXT":
-                data = export_as_txt(msgs, "RAG Chatbot Export")
-                mime, ext = "text/plain", "txt"
-            elif fmt == "CSV":
-                data = export_as_csv(msgs)
-                mime, ext = "text/csv", "csv"
-            elif fmt == "JSON":
-                data = export_as_json(msgs)
-                mime, ext = "application/json", "json"
+        with ecol2:
+            st.markdown("**Evaluation Report**")
+            if st.session_state.eval_history:
+                import pandas as pd
+                csv_b = pd.DataFrame(st.session_state.eval_history).to_csv(index=False).encode("utf-8")
+                st.download_button("Download Evaluation CSV", data=csv_b,
+                    file_name=f"rag_eval_{ts}.csv", mime="text/csv",
+                    use_container_width=True)
             else:
-                data = export_as_pdf(msgs, "RAG Chatbot Export")
-                mime, ext = "application/pdf", "pdf"
-
-            st.download_button(
-                label=f"Download .{ext}",
-                data=data,
-                file_name=f"rag_chat_{ts}.{ext}",
-                mime=mime,
-                key=f"dl_{ext}",
-            )
-
-    with col2:
-        st.markdown("### Export Evaluation Report")
-        if st.session_state.eval_history:
-            import pandas as pd
-            df = pd.DataFrame(st.session_state.eval_history)
-            csv_bytes = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download Evaluation CSV",
-                data=csv_bytes,
-                file_name=f"rag_eval_{ts}.csv",
-                mime="text/csv",
-                key="dl_eval_csv",
-                use_container_width=True,
-            )
-        else:
-            st.info("No evaluation data to export.")
+                st.info("No evaluation data to export.")
 
 
-# ═══════════════════════════════════════════════════════════════════ #
-#  Main Layout                                                         #
-# ═══════════════════════════════════════════════════════════════════ #
-
-def main():
-    render_sidebar()
-
-    st.markdown('<h1 class="main-title">RAG Chatbot</h1>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="main-subtitle">Retrieval-Augmented Generation with evaluation, '
-        'hybrid search, and multilingual support.</p>',
-        unsafe_allow_html=True,
-    )
-
-    tab_chat, tab_docs, tab_eval, tab_export = st.tabs(
-        ["Chat", "Documents", "Evaluation", "Export"]
-    )
-
-    with tab_chat:
-        render_chat_tab()
-    with tab_docs:
-        render_documents_tab()
-    with tab_eval:
-        render_evaluation_tab()
-    with tab_export:
-        render_export_tab()
-
-
-if __name__ == "__main__":
-    main()
+# ── Footer ───────────────────────────────────────────────────────────
+st.markdown(
+    '<div class="footer-strip">'
+    'Built with LangChain · FAISS · RAGAS · Groq &nbsp;&nbsp;|&nbsp;&nbsp; '
+    '<span>Made in India</span>'
+    '</div>',
+    unsafe_allow_html=True
+)
